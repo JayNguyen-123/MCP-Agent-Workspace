@@ -1,0 +1,32 @@
+apiVersion: 1
+
+contactPoints:
+  - orgId: 1
+    name: slack-ops
+    receivers:
+      - uid: slack-ops
+        type: slack
+        disableResolveMessage: false
+        settings:
+          url: $SLACK_WEBHOOK_URL        # injected from the environment, never committed
+          title: '{{ .Status | toUpper }}: {{ .CommonLabels.alertname }}'
+          text: |
+            {{ range .Alerts }}
+            *{{ .Annotations.summary }}*
+            {{ .Annotations.description }}
+            Severity: `{{ .Labels.severity }}` · Started: {{ .StartsAt.Format "2006-01-02 15:04 MST" }}
+            {{ end }}
+
+policies:
+  - orgId: 1
+    receiver: slack-ops
+    group_by: ["alertname", "severity"]
+    group_wait: 30s
+    group_interval: 5m
+    repeat_interval: 4h
+    routes:
+      - receiver: slack-ops
+        object_matchers:
+          - ["severity", "=", "critical"]
+        group_wait: 5s
+        repeat_interval: 1h

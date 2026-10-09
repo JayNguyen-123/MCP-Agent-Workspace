@@ -1,1 +1,118 @@
+apiVersion: 1
 
+groups:
+  - orgId: 1
+    name: agent-workspace
+    folder: Agent Workspace
+    interval: 30s
+    rules:
+      # Fires on each new trip and resolves on its own (counter-based; the original
+      # gauge was never reset, so the alert stayed firing forever).
+      - uid: agent-circuit-breaker
+        title: Agent circuit breaker tripped
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              expr: sum(increase(agent_circuit_breaker_trips_total[5m])) or vector(0)
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+        noDataState: OK
+        execErrState: Error
+        for: 0s
+        labels: { severity: critical }
+        annotations:
+          summary: Agent run(s) hit the hop limit
+          description: "{{ $values.A }} run(s) were force-stopped by the circuit breaker in the last 5 minutes."
+
+      # rate() is per second; multiply by 60 for tokens/minute.
+      - uid: agent-token-burn
+        title: Token burn rate high
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              expr: (sum(rate(agent_token_consumption_total[5m])) or vector(0)) * 60
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [50000] }
+        noDataState: OK
+        execErrState: Error
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: Token consumption above 50k/min for 5 minutes
+          description: "Current burn rate: {{ humanize $values.A.Value }} tokens/min."
+
+      - uid: agent-run-failures
+        title: Agent runs failing
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 900, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              expr: sum(increase(agent_runs_total{outcome=~"failed|timeout"}[10m])) or vector(0)
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [3] }
+        noDataState: OK
+        execErrState: Error
+        for: 0s
+        labels: { severity: warning }
+        annotations:
+          summary: More than 3 agent runs failed in 10 minutes
+          description: Check API logs and sandbox health.
+
+      - uid: agent-api-down
+        title: Agent API down
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 300, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              expr: min(up{job="agent-api"}) or vector(0)
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: lt, params: [1] }
+        noDataState: Alerting
+        execErrState: Error
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: Prometheus cannot scrape the agent API
+          description: The agent-service metrics endpoint has been unreachable for 2 minutes.
