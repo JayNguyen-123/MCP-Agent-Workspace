@@ -1,0 +1,42 @@
+# Paid LLM regression evals. Deliberately NOT run on pull_request: forked PRs have no
+# secrets, and running paid evals on every push is slow and costly. Trigger manually,
+# nightly, or from a release workflow.
+name: Agent evals
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 7 * * *"   # nightly, 07:17 UTC
+
+permissions:
+  contents: read
+
+jobs:
+  evals:
+    runs-on: ubuntu-latest
+    environment: evals      # protect the API-key secrets with a GitHub environment
+    timeout-minutes: 30
+    env:
+      ENVIRONMENT: test
+      SANDBOX_AUTH_TOKEN: ${{ github.run_id }}-${{ github.run_attempt }}-ci-sandbox-token-padding
+      SANDBOX_MCP_URL: http://127.0.0.1:9000/mcp
+      SANDBOX_ALLOWED_HOSTS: "127.0.0.1:*"
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      LANGSMITH_API_KEY: ${{ secrets.LANGSMITH_API_KEY }}
+      LANGSMITH_TRACING: "true"
+      LANGSMITH_PROJECT: agent-workspace-evals
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with: { enable-cache: true }
+      - run: uv sync --locked --extra api --extra sandbox --group evals
+      - name: Start sandbox MCP server
+        env:
+          SANDBOX_WORKSPACE: ${{ runner.temp }}/sandbox
+        run: |
+          uv run python -m sandbox_server.server > sandbox.log 2>&1 &
+          for i in $(seq 1 30); do curl -fs http://127.0.0.1:9000/healthz && exit 0; sleep 1; done
+          cat sandbox.log; exit 1
+      - run: uv run python evals/run_evals.py
+      - if: failure()
+        run: cat sandbox.log

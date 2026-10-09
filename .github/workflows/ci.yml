@@ -1,1 +1,67 @@
+name: CI
 
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with: { enable-cache: true }
+      - run: uv lock --check            # uv.lock must be committed and current
+      - run: uv run --only-group dev ruff check .
+      - run: uv run --only-group dev ruff format --check .
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with: { enable-cache: true }
+      - run: uv sync --locked --all-extras --group dev --python ${{ matrix.python }}
+      # Fully hermetic: SQLite + in-memory fakes; no Redis, Postgres, LLM or secrets needed.
+      # The sandbox tests run as a non-root user here, so the fork-bomb test also executes.
+      - run: uv run pytest -q -rs
+
+  docker:
+    runs-on: ubuntu-latest
+    needs: [lint, test]
+    strategy:
+      matrix:
+        target: [api, sandbox, ui]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: ${{ matrix.target }}
+          push: false
+          cache-from: type=gha,scope=${{ matrix.target }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.target }}
+      - run: docker compose config --quiet
+        env:   # dummy values only to validate the compose file renders
+          POSTGRES_PASSWORD: x
+          REDIS_PASSWORD: x
+          SANDBOX_AUTH_TOKEN: x
+          JWT_SECRET_KEY: x
+          OPERATORS_JSON: "{}"
+          ANTHROPIC_API_KEY: x
+          GRAFANA_ADMIN_PASSWORD: x
+          SLACK_WEBHOOK_URL: https://example.invalid
