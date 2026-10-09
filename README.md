@@ -4,7 +4,7 @@ A hierarchical multi-agent coding team (Supervisor → Coder ⇄ Tools → Revie
 **LangGraph**, with code execution in an isolated **MCP** sandbox, **human approval** for
 package installs, and a **FastAPI** control plane with an operator dashboard.
 
-See [`REVIEW.md`](REVIEW.md) for the production-readiness review that produced this version.
+
 
 ## Architecture
 
