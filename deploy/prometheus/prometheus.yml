@@ -1,1 +1,12 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
 
+scrape_configs:
+  - job_name: agent-api
+    static_configs:
+      - targets: ["agent-service:8001"]   # metrics port is not published outside the stack
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
