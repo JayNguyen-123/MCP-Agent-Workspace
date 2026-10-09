@@ -1,0 +1,85 @@
+[project]
+name = "agent-workspace"
+version = "0.2.0"
+description = "Hierarchical multi-agent coding sandbox using MCP, LangGraph and FastAPI."
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    "pydantic>=2.7.0",
+]
+
+[project.optional-dependencies]
+# One image per extra: `uv sync --extra api|sandbox|ui`.
+api = [
+    # Agent orchestration
+    "langchain-core>=0.3.60",
+    "langchain-anthropic>=0.3.15",
+    "langgraph>=0.4.8",
+    "langgraph-checkpoint-postgres>=2.0.21",
+    "mcp>=2.2,<3",
+    "httpx2>=2.13",
+    # API service
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "pydantic>=2.7.0",
+    "pydantic-settings>=2.3.0",
+    "sqlmodel>=0.0.22",
+    "sqlalchemy[asyncio]>=2.0.30",
+    "psycopg[binary,pool]>=3.2.0",
+    "redis>=5.0.4",
+    "pyjwt>=2.8.0",
+    "prometheus-client>=0.20.0",
+    "openai>=1.40.0",
+]
+sandbox = [
+    "mcp>=2.2,<3",
+    "packaging>=24.0",
+    "ruff>=0.5.0",
+    "uvicorn[standard]>=0.30.0",
+]
+ui = [
+    "streamlit>=1.36.0",
+    "requests>=2.32.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.2.0",
+    "aiosqlite>=0.20.0",
+    "httpx>=0.27.0",
+    "ruff>=0.5.0",
+    "packaging>=24.0",
+]
+evals = [
+    "langsmith>=0.2.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agent_workspace", "src/sandbox_server"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["F", "E", "W", "I", "B", "UP", "S", "ASYNC"]
+ignore = ["S101"]  # assert is fine in tests
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S105", "S106", "S311"]
+"src/agent_workspace/metrics.py" = ["S106"]  # "token_type" label is not a password
+# The sandbox *must* spawn subprocesses; inputs are validated before use.
+"src/sandbox_server/executor.py" = ["S603", "S607"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["agent_workspace", "sandbox_server"]
+known-local-folder = ["fakes", "matrix_solver"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "tests"]

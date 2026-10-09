@@ -1,0 +1,160 @@
+# Full stack. Copy .env.example to .env and fill in every value first.
+#
+# Network layout (nothing is reachable from outside except the 127.0.0.1-bound ports):
+#   egress   : agent-service only — outbound access to the LLM / embeddings APIs
+#   data     : internal — agent-service ⇄ db, redis
+#   sandbox  : internal — agent-service ⇄ sandbox. The sandbox has NO internet access,
+#              so model-generated code cannot exfiltrate data. Package installs need
+#              an internal PyPI mirror (SANDBOX_PIP_INDEX_URL) reachable on this network.
+#   frontend : ui ⇄ agent-service
+#   metrics  : internal — prometheus ⇄ agent-service, grafana
+#   ops      : prometheus, grafana — only so their 127.0.0.1 ports can be published
+
+x-hardening: &hardening
+  security_opt: ["no-new-privileges:true"]
+  cap_drop: ["ALL"]
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options: { max-size: "10m", max-file: "5" }
+
+services:
+  # ---------------------------------------------------------------- storage
+  db:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: agent_db
+      POSTGRES_USER: agent
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./deploy/postgres/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    networks: [data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agent -d agent_db"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    security_opt: ["no-new-privileges:true"]   # entrypoint needs CHOWN/SETUID, so no cap_drop
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}", "--appendonly", "yes"]
+    volumes: [redisdata:/data]
+    networks: [data]
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$${REDIS_PASSWORD}\" --no-auth-warning ping | grep PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+
+  # ---------------------------------------------------------------- compute
+  sandbox:
+    build: { context: ., target: sandbox }
+    <<: *hardening
+    read_only: true
+    tmpfs: ["/tmp:size=256m,mode=1777"]
+    volumes:
+      - sandbox_workspace:/workspace
+      - sandbox_venv:/opt/sandbox-venv     # packages installed by approved requests
+    environment:
+      SANDBOX_AUTH_TOKEN: ${SANDBOX_AUTH_TOKEN:?set SANDBOX_AUTH_TOKEN in .env}
+      SANDBOX_ALLOWED_HOSTS: "sandbox:*"
+      SANDBOX_PACKAGE_ALLOWLIST: ${SANDBOX_PACKAGE_ALLOWLIST:-}
+      PIP_INDEX_URL: ${SANDBOX_PIP_INDEX_URL:-}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    networks: [sandbox]
+    pids_limit: 256
+    mem_limit: 2g
+    cpus: 2
+
+  agent-service:
+    build: { context: ., target: api }
+    <<: *hardening
+    read_only: true
+    tmpfs: ["/tmp:size=64m"]
+    depends_on:
+      db: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      sandbox: { condition: service_healthy }
+    environment:
+      ENVIRONMENT: production
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      DATABASE_URL: postgresql+psycopg://agent:${POSTGRES_PASSWORD}@db:5432/agent_db
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?set JWT_SECRET_KEY in .env}
+      OPERATORS_JSON: ${OPERATORS_JSON:?set OPERATORS_JSON in .env}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?set ANTHROPIC_API_KEY in .env}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      SEMANTIC_CACHE_ENABLED: ${SEMANTIC_CACHE_ENABLED:-false}
+      SANDBOX_MCP_URL: http://sandbox:9000/mcp
+      SANDBOX_AUTH_TOKEN: ${SANDBOX_AUTH_TOKEN}
+      SUPERVISOR_MODEL: ${SUPERVISOR_MODEL:-claude-sonnet-5-5}
+      CODER_MODEL: ${CODER_MODEL:-claude-sonnet-5-5}
+      REVIEWER_MODEL: ${REVIEWER_MODEL:-claude-sonnet-5-5}
+      LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+      LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-agent-workspace}
+    ports: ["127.0.0.1:8000:8000"]
+    networks: [egress, data, sandbox, frontend, metrics]
+
+  ui:
+    build: { context: ., target: ui }
+    <<: *hardening
+    read_only: true
+    tmpfs: ["/tmp:size=64m", "/home/app:size=16m,uid=10001,gid=10001"]
+    depends_on:
+      agent-service: { condition: service_healthy }
+    environment:
+      BACKEND_URL: http://agent-service:8000
+    ports: ["127.0.0.1:8501:8501"]
+    networks: [frontend]
+
+  # -------------------------------------------------------------- telemetry
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=15d
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports: ["127.0.0.1:9090:9090"]
+    networks: [metrics, ops]
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    restart: unless-stopped
+    depends_on: [prometheus]
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in .env}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:?set SLACK_WEBHOOK_URL in .env}
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+    ports: ["127.0.0.1:3000:3000"]
+    networks: [metrics, ops, egress]   # egress so Slack notifications can be delivered
+
+volumes:
+  pgdata:
+  redisdata:
+  sandbox_workspace:
+  sandbox_venv:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  egress: {}
+  frontend: {}
+  ops: {}          # non-internal so the 127.0.0.1 ports for Prometheus/Grafana can be published
+  data: { internal: true }
+  sandbox: { internal: true }
+  metrics: { internal: true }
